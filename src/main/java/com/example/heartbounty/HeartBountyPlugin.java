@@ -90,13 +90,13 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
     }
 
     private int getMaxHearts(Player p) {
-        AttributeInstance inst = p.getAttribute(Attribute.GENERIC_MAX_HEALTH);
+        AttributeInstance inst = p.getAttribute(Attribute.MAX_HEALTH);
         if (inst == null) return 10; // vanilla fallback
         return Math.max(1, healthToHearts(inst.getBaseValue()));
     }
 
     private void setMaxHearts(Player p, int hearts) {
-        AttributeInstance inst = p.getAttribute(Attribute.GENERIC_MAX_HEALTH);
+        AttributeInstance inst = p.getAttribute(Attribute.MAX_HEALTH);
         if (inst == null) return;
 
         int clamped = Math.min(maxHearts, Math.max(minHearts, hearts));
