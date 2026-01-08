@@ -23,7 +23,10 @@ import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
 
-import java.util.*;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Objects;
 import java.util.stream.Collectors;
 
 public final class HeartBountyPlugin extends JavaPlugin implements Listener, TabExecutor {
@@ -85,7 +88,6 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
     }
 
     private static int healthToHearts(double health) {
-        // health points -> hearts (rounded to nearest whole heart, but we store as int hearts)
         return (int) Math.round(health / 2.0);
     }
 
@@ -128,7 +130,6 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
 
         // Natural causes (no player killer) => do nothing
         if (killer == null || killer.equals(victim)) return;
-
         if (heartsPerKill <= 0) return;
 
         // Victim loses hearts
@@ -137,7 +138,6 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
         // Killer gains hearts
         addHearts(killer, +heartsPerKill);
 
-        // Optional: small feedback
         killer.sendMessage(ChatColor.RED + "You gained +" + heartsPerKill + " heart(s)!");
         victim.sendMessage(ChatColor.DARK_RED + "You lost -" + heartsPerKill + " heart(s)!");
     }
@@ -153,7 +153,6 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
         ItemMeta meta = item.getItemMeta();
         if (meta != null) {
             meta.setDisplayName(color(withdrawName));
-
             List<String> lore = withdrawLore.stream().map(HeartBountyPlugin::color).collect(Collectors.toList());
             meta.setLore(lore);
 
@@ -171,7 +170,12 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
         return pdc.get(heartsKey, PersistentDataType.INTEGER);
     }
 
-    @EventHandler(ignoreCancelled = true)
+    /**
+     * IMPORTANT FIX:
+     * - priority HIGHEST + ignoreCancelled=false so other plugins cancelling interact won't block heart use
+     * - updateInventory() after consuming to avoid client desync where it "only works after drop/pickup"
+     */
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
     public void onUseHeartItem(PlayerInteractEvent event) {
         if (event.getItem() == null) return;
         Player p = event.getPlayer();
@@ -188,20 +192,24 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
         int current = getMaxHearts(p);
         if (current >= maxHearts) {
             p.sendMessage(ChatColor.GRAY + "You are already at the max of " + maxHearts + " hearts.");
+            event.setCancelled(true);
             return;
         }
 
         // Apply
         addHearts(p, hearts);
 
-        // Consume 1 item
+        // Consume 1 item from the stack in hand
         ItemStack inHand = event.getItem();
         int amt = inHand.getAmount();
         if (amt <= 1) {
-            p.getInventory().setItem(event.getHand(), null);
+            p.getInventory().setItem(event.getHand(), new ItemStack(Material.AIR));
         } else {
             inHand.setAmount(amt - 1);
         }
+
+        // Force client sync (fixes "must drop/pickup to use" on some servers)
+        p.updateInventory();
 
         p.sendMessage(ChatColor.RED + "You consumed +" + hearts + " heart(s).");
         event.setCancelled(true);
@@ -244,7 +252,6 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
             for (int i = 0; i < amount; i++) {
                 HashMap<Integer, ItemStack> leftover = p.getInventory().addItem(makeHeartItem(1));
                 if (!leftover.isEmpty()) {
-                    // Drop if full inventory
                     p.getWorld().dropItemNaturally(p.getLocation(), makeHeartItem(1));
                 }
             }
