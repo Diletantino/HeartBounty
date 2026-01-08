@@ -17,6 +17,7 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
+import org.bukkit.event.player.PlayerRespawnEvent;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.persistence.PersistentDataContainer;
@@ -26,7 +27,9 @@ import org.bukkit.plugin.java.JavaPlugin;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
 import java.util.stream.Collectors;
 
 public final class HeartBountyPlugin extends JavaPlugin implements Listener, TabExecutor {
@@ -40,6 +43,9 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
     private Material withdrawMaterial;
     private String withdrawName;
     private List<String> withdrawLore;
+
+    // IMPORTANT: store victim heart loss and apply AFTER respawn (prevents "can't respawn" bug)
+    private final Map<UUID, Integer> pendingLoss = new HashMap<>();
 
     @Override
     public void onEnable() {
@@ -106,9 +112,12 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
 
         inst.setBaseValue(newMax);
 
+        // CRITICAL: do NOT touch health while player is dead (can break respawn)
+        if (p.isDead()) return;
+
         // Keep current health within bounds
         if (p.getHealth() > newMax) p.setHealth(newMax);
-        if (p.getHealth() <= 0) p.setHealth(Math.min(newMax, 1.0));
+        // do NOT force-set health upward here; let Minecraft handle normal health rules
     }
 
     private void addHearts(Player p, int delta) {
@@ -132,14 +141,26 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
         if (killer == null || killer.equals(victim)) return;
         if (heartsPerKill <= 0) return;
 
-        // Victim loses hearts
-        addHearts(victim, -heartsPerKill);
+        // Lightning EFFECT ONLY (no damage/fire)
+        victim.getWorld().strikeLightningEffect(victim.getLocation());
 
-        // Killer gains hearts
+        // Killer gains hearts immediately (safe)
         addHearts(killer, +heartsPerKill);
-
         killer.sendMessage(ChatColor.RED + "You gained +" + heartsPerKill + " heart(s)!");
-        victim.sendMessage(ChatColor.DARK_RED + "You lost -" + heartsPerKill + " heart(s)!");
+
+        // Victim loses hearts AFTER respawn (prevents respawn bug)
+        pendingLoss.merge(victim.getUniqueId(), heartsPerKill, Integer::sum);
+        victim.sendMessage(ChatColor.DARK_RED + "You will lose -" + heartsPerKill + " heart(s) on respawn!");
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onRespawn(PlayerRespawnEvent event) {
+        Player p = event.getPlayer();
+        Integer loss = pendingLoss.remove(p.getUniqueId());
+        if (loss == null || loss <= 0) return;
+
+        // Apply one tick later to avoid edge-case timing issues
+        Bukkit.getScheduler().runTask(this, () -> addHearts(p, -loss));
     }
 
     /* -----------------------------
@@ -170,11 +191,7 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
         return pdc.get(heartsKey, PersistentDataType.INTEGER);
     }
 
-    /**
-     * IMPORTANT FIX:
-     * - priority HIGHEST + ignoreCancelled=false so other plugins cancelling interact won't block heart use
-     * - updateInventory() after consuming to avoid client desync where it "only works after drop/pickup"
-     */
+    // Heart item use in hand (works even if other plugins cancel interact)
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
     public void onUseHeartItem(PlayerInteractEvent event) {
         if (event.getItem() == null) return;
@@ -183,7 +200,6 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
         Integer hearts = getHeartsInItem(event.getItem());
         if (hearts == null || hearts <= 0) return;
 
-        // Only right click
         switch (event.getAction()) {
             case RIGHT_CLICK_AIR, RIGHT_CLICK_BLOCK -> {}
             default -> { return; }
@@ -196,10 +212,8 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
             return;
         }
 
-        // Apply
         addHearts(p, hearts);
 
-        // Consume 1 item from the stack in hand
         ItemStack inHand = event.getItem();
         int amt = inHand.getAmount();
         if (amt <= 1) {
@@ -208,9 +222,7 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
             inHand.setAmount(amt - 1);
         }
 
-        // Force client sync (fixes "must drop/pickup to use" on some servers)
         p.updateInventory();
-
         p.sendMessage(ChatColor.RED + "You consumed +" + hearts + " heart(s).");
         event.setCancelled(true);
     }
@@ -248,7 +260,6 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
 
             setMaxHearts(p, remaining);
 
-            // Give items (1 per withdraw, each worth 1 heart)
             for (int i = 0; i < amount; i++) {
                 HashMap<Integer, ItemStack> leftover = p.getInventory().addItem(makeHeartItem(1));
                 if (!leftover.isEmpty()) {
@@ -280,7 +291,6 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
             }
 
             if (sub.equals("giveitem")) {
-                // /hearts giveitem <amount>
                 if (!(sender instanceof Player p)) {
                     sender.sendMessage("Players only.");
                     return true;
@@ -291,7 +301,6 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
                 }
                 amount = Math.max(1, amount);
 
-                // Allow: OP/admin OR creative mode (self)
                 if (!sender.hasPermission("heartbounty.admin") && p.getGameMode() != GameMode.CREATIVE) {
                     sender.sendMessage(ChatColor.RED + "You must be in creative (or have admin permission) to do that.");
                     return true;
@@ -308,8 +317,6 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
             }
 
             if (sub.equals("add") || sub.equals("set")) {
-                // /hearts add <player> <amount>
-                // /hearts set <player> <amount>
                 if (args.length < 3) {
                     sender.sendMessage(ChatColor.GRAY + "Usage: /hearts " + sub + " <player> <amount>");
                     return true;
@@ -329,9 +336,6 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
                     return true;
                 }
 
-                // Allow:
-                // - Admin permission always
-                // - OR (creative player setting/adding to self)
                 if (!sender.hasPermission("heartbounty.admin")) {
                     if (sender instanceof Player p && p.getGameMode() == GameMode.CREATIVE && p.getUniqueId().equals(target.getUniqueId())) {
                         // ok
