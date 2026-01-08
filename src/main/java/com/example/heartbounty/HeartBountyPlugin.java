@@ -24,12 +24,7 @@ import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
 
-import java.util.HashMap;
-import java.util.List;
-import java.util.Locale;
-import java.util.Map;
-import java.util.Objects;
-import java.util.UUID;
+import java.util.*;
 import java.util.stream.Collectors;
 
 public final class HeartBountyPlugin extends JavaPlugin implements Listener, TabExecutor {
@@ -44,7 +39,10 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
     private String withdrawName;
     private List<String> withdrawLore;
 
-    // IMPORTANT: store victim heart loss and apply AFTER respawn (prevents "can't respawn" bug)
+    private List<String> deathMessages;
+    private final Random random = new Random();
+
+    // Потерю сердец жертве применяем ПОСЛЕ респавна (иначе Paper может багаться с возрождением)
     private final Map<UUID, Integer> pendingLoss = new HashMap<>();
 
     @Override
@@ -62,16 +60,16 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
         Objects.requireNonNull(getCommand("hearts")).setExecutor(this);
         Objects.requireNonNull(getCommand("hearts")).setTabCompleter(this);
 
-        // Clamp online players if /reload is used
         for (Player p : Bukkit.getOnlinePlayers()) {
             clampMaxHealth(p);
         }
 
-        getLogger().info("HeartBounty enabled.");
+        getLogger().info("HeartBounty включён.");
     }
 
     private void reloadSettings() {
         FileConfiguration cfg = getConfig();
+
         this.minHearts = Math.max(1, cfg.getInt("minHearts", 1));
         this.maxHearts = Math.max(this.minHearts, cfg.getInt("maxHearts", 20));
         this.heartsPerKill = Math.max(0, cfg.getInt("heartsPerKill", 1));
@@ -80,13 +78,20 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
         Material m = Material.matchMaterial(mat == null ? "" : mat);
         this.withdrawMaterial = (m == null) ? Material.NETHER_STAR : m;
 
-        this.withdrawName = cfg.getString("withdrawItemName", "&cHeart");
+        this.withdrawName = cfg.getString("withdrawItemName", "&cСердце");
         this.withdrawLore = cfg.getStringList("withdrawItemLore");
-        if (this.withdrawLore == null) this.withdrawLore = List.of("&7Right-click to gain &c+1 heart&7.");
+        if (this.withdrawLore == null || this.withdrawLore.isEmpty()) {
+            this.withdrawLore = List.of("&7ПКМ: получить &c+1 сердце&7.");
+        }
+
+        this.deathMessages = cfg.getStringList("death-messages");
+        if (this.deathMessages == null || this.deathMessages.isEmpty()) {
+            this.deathMessages = defaultDeathMessages();
+        }
     }
 
     /* -----------------------------
-       Core heart math
+       Сердца / здоровье
        ----------------------------- */
 
     private static double heartsToHealth(int hearts) {
@@ -99,7 +104,7 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
 
     private int getMaxHearts(Player p) {
         AttributeInstance inst = p.getAttribute(Attribute.MAX_HEALTH);
-        if (inst == null) return 10; // vanilla fallback
+        if (inst == null) return 10;
         return Math.max(1, healthToHearts(inst.getBaseValue()));
     }
 
@@ -112,12 +117,11 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
 
         inst.setBaseValue(newMax);
 
-        // CRITICAL: do NOT touch health while player is dead (can break respawn)
+        // КРИТИЧНО: НЕ трогать здоровье, пока игрок мёртв (может сломать возрождение)
         if (p.isDead()) return;
 
-        // Keep current health within bounds
+        // Поджимаем текущее здоровье под новый максимум
         if (p.getHealth() > newMax) p.setHealth(newMax);
-        // do NOT force-set health upward here; let Minecraft handle normal health rules
     }
 
     private void addHearts(Player p, int delta) {
@@ -129,7 +133,7 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
     }
 
     /* -----------------------------
-       PvP logic
+       PvP логика
        ----------------------------- */
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
@@ -137,20 +141,30 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
         Player victim = event.getEntity();
         Player killer = victim.getKiller();
 
-        // Natural causes (no player killer) => do nothing
+        // Естественная смерть — сердца не меняем
         if (killer == null || killer.equals(victim)) return;
         if (heartsPerKill <= 0) return;
 
-        // Lightning EFFECT ONLY (no damage/fire)
+        // Убираем ванильное сообщение смерти (чтобы не дублировалось)
+        event.setDeathMessage(null);
+
+        // Молния — только эффект (без урона/огня/разрушений)
         victim.getWorld().strikeLightningEffect(victim.getLocation());
 
-        // Killer gains hearts immediately (safe)
-        addHearts(killer, +heartsPerKill);
-        killer.sendMessage(ChatColor.RED + "You gained +" + heartsPerKill + " heart(s)!");
+        // Случайное сообщение в чат
+        String template = deathMessages.get(random.nextInt(deathMessages.size()));
+        String msg = template
+                .replace("{killer}", killer.getName())
+                .replace("{victim}", victim.getName());
+        Bukkit.broadcastMessage(color(msg));
 
-        // Victim loses hearts AFTER respawn (prevents respawn bug)
+        // Убийце +сердца сразу (безопасно)
+        addHearts(killer, +heartsPerKill);
+        killer.sendMessage(ChatColor.RED + "Ты получил(а) +" + heartsPerKill + " сердце(ц).");
+
+        // Жертве -сердца ПОСЛЕ респавна (чтобы не ломать respawn)
         pendingLoss.merge(victim.getUniqueId(), heartsPerKill, Integer::sum);
-        victim.sendMessage(ChatColor.DARK_RED + "You will lose -" + heartsPerKill + " heart(s) on respawn!");
+        victim.sendMessage(ChatColor.DARK_RED + "После возрождения ты потеряешь -" + heartsPerKill + " сердце(ц).");
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
@@ -159,12 +173,11 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
         Integer loss = pendingLoss.remove(p.getUniqueId());
         if (loss == null || loss <= 0) return;
 
-        // Apply one tick later to avoid edge-case timing issues
         Bukkit.getScheduler().runTask(this, () -> addHearts(p, -loss));
     }
 
     /* -----------------------------
-       Withdraw item + consume logic
+       Предмет-сердце: вывод/использование
        ----------------------------- */
 
     private ItemStack makeHeartItem(int amountHearts) {
@@ -191,7 +204,7 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
         return pdc.get(heartsKey, PersistentDataType.INTEGER);
     }
 
-    // Heart item use in hand (works even if other plugins cancel interact)
+    // Использование сердца в руке (работает даже если другие плагины cancel interact)
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
     public void onUseHeartItem(PlayerInteractEvent event) {
         if (event.getItem() == null) return;
@@ -207,7 +220,7 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
 
         int current = getMaxHearts(p);
         if (current >= maxHearts) {
-            p.sendMessage(ChatColor.GRAY + "You are already at the max of " + maxHearts + " hearts.");
+            p.sendMessage(ChatColor.GRAY + "У тебя уже максимум: " + maxHearts + " сердец.");
             event.setCancelled(true);
             return;
         }
@@ -223,12 +236,12 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
         }
 
         p.updateInventory();
-        p.sendMessage(ChatColor.RED + "You consumed +" + hearts + " heart(s).");
+        p.sendMessage(ChatColor.RED + "Ты использовал(а) +" + hearts + " сердце(ц).");
         event.setCancelled(true);
     }
 
     /* -----------------------------
-       Commands
+       Команды (НЕ переводил названия команд)
        ----------------------------- */
 
     @Override
@@ -236,11 +249,11 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
 
         if (command.getName().equalsIgnoreCase("withdraw")) {
             if (!(sender instanceof Player p)) {
-                sender.sendMessage("Players only.");
+                sender.sendMessage("Только для игроков.");
                 return true;
             }
             if (!sender.hasPermission("heartbounty.withdraw")) {
-                sender.sendMessage(ChatColor.RED + "No permission.");
+                sender.sendMessage(ChatColor.RED + "Нет прав.");
                 return true;
             }
 
@@ -254,7 +267,7 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
             int remaining = current - amount;
 
             if (remaining < minHearts) {
-                p.sendMessage(ChatColor.RED + "You can't withdraw that many. Minimum is " + minHearts + " hearts.");
+                p.sendMessage(ChatColor.RED + "Нельзя вывести столько. Минимум: " + minHearts + " сердец.");
                 return true;
             }
 
@@ -267,13 +280,13 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
                 }
             }
 
-            p.sendMessage(ChatColor.RED + "Withdrew " + amount + " heart(s) into item(s).");
+            p.sendMessage(ChatColor.RED + "Выведено " + amount + " сердце(ц) в предметы.");
             return true;
         }
 
         if (command.getName().equalsIgnoreCase("hearts")) {
             if (args.length == 0) {
-                sender.sendMessage(ChatColor.GRAY + "Usage: /hearts <add|set|giveitem|reload> ...");
+                sender.sendMessage(ChatColor.GRAY + "Использование: /hearts <add|set|giveitem|reload> ...");
                 return true;
             }
 
@@ -281,18 +294,18 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
 
             if (sub.equals("reload")) {
                 if (!sender.hasPermission("heartbounty.admin")) {
-                    sender.sendMessage(ChatColor.RED + "No permission.");
+                    sender.sendMessage(ChatColor.RED + "Нет прав.");
                     return true;
                 }
                 reloadConfig();
                 reloadSettings();
-                sender.sendMessage(ChatColor.GREEN + "HeartBounty reloaded.");
+                sender.sendMessage(ChatColor.GREEN + "HeartBounty перезагружен.");
                 return true;
             }
 
             if (sub.equals("giveitem")) {
                 if (!(sender instanceof Player p)) {
-                    sender.sendMessage("Players only.");
+                    sender.sendMessage("Только для игроков.");
                     return true;
                 }
                 int amount = 1;
@@ -302,7 +315,7 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
                 amount = Math.max(1, amount);
 
                 if (!sender.hasPermission("heartbounty.admin") && p.getGameMode() != GameMode.CREATIVE) {
-                    sender.sendMessage(ChatColor.RED + "You must be in creative (or have admin permission) to do that.");
+                    sender.sendMessage(ChatColor.RED + "Нужно быть в креативе (или иметь админ-права).");
                     return true;
                 }
 
@@ -312,19 +325,19 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
                         p.getWorld().dropItemNaturally(p.getLocation(), makeHeartItem(1));
                     }
                 }
-                p.sendMessage(ChatColor.RED + "Given " + amount + " heart item(s).");
+                p.sendMessage(ChatColor.RED + "Выдано " + amount + " предмет(ов) сердца.");
                 return true;
             }
 
             if (sub.equals("add") || sub.equals("set")) {
                 if (args.length < 3) {
-                    sender.sendMessage(ChatColor.GRAY + "Usage: /hearts " + sub + " <player> <amount>");
+                    sender.sendMessage(ChatColor.GRAY + "Использование: /hearts " + sub + " <player> <amount>");
                     return true;
                 }
 
                 Player target = Bukkit.getPlayerExact(args[1]);
                 if (target == null) {
-                    sender.sendMessage(ChatColor.RED + "Player not found (must be online).");
+                    sender.sendMessage(ChatColor.RED + "Игрок не найден (должен быть онлайн).");
                     return true;
                 }
 
@@ -332,30 +345,31 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
                 try {
                     amount = Integer.parseInt(args[2]);
                 } catch (NumberFormatException e) {
-                    sender.sendMessage(ChatColor.RED + "Amount must be a number.");
+                    sender.sendMessage(ChatColor.RED + "Количество должно быть числом.");
                     return true;
                 }
 
                 if (!sender.hasPermission("heartbounty.admin")) {
                     if (sender instanceof Player p && p.getGameMode() == GameMode.CREATIVE && p.getUniqueId().equals(target.getUniqueId())) {
-                        // ok
+                        // можно
                     } else {
-                        sender.sendMessage(ChatColor.RED + "No permission.");
+                        sender.sendMessage(ChatColor.RED + "Нет прав.");
                         return true;
                     }
                 }
 
                 if (sub.equals("add")) {
                     addHearts(target, amount);
-                    sender.sendMessage(ChatColor.GREEN + "Added " + amount + " heart(s) to " + target.getName() + ".");
+                    sender.sendMessage(ChatColor.GREEN + "Добавлено " + amount + " сердце(ц) игроку " + target.getName() + ".");
                 } else {
                     setMaxHearts(target, amount);
-                    sender.sendMessage(ChatColor.GREEN + "Set " + target.getName() + " to " + Math.min(maxHearts, Math.max(minHearts, amount)) + " hearts.");
+                    int clamped = Math.min(maxHearts, Math.max(minHearts, amount));
+                    sender.sendMessage(ChatColor.GREEN + "Макс.сердца игрока " + target.getName() + " установлены на " + clamped + ".");
                 }
                 return true;
             }
 
-            sender.sendMessage(ChatColor.GRAY + "Usage: /hearts <add|set|giveitem|reload> ...");
+            sender.sendMessage(ChatColor.GRAY + "Использование: /hearts <add|set|giveitem|reload> ...");
             return true;
         }
 
@@ -389,5 +403,40 @@ public final class HeartBountyPlugin extends JavaPlugin implements Listener, Tab
 
     private static String color(String s) {
         return ChatColor.translateAlternateColorCodes('&', s == null ? "" : s);
+    }
+
+    private static List<String> defaultDeathMessages() {
+        return List.of(
+                "&c[{killer}] &7отправляет &c[{victim}] &7в лобби!",
+                "&c[{victim}] &7узнал, что PvP было включено",
+                "&c[{killer}] &7показал &c[{victim}] &7где кнопка выхода",
+                "&c[{victim}] &7не прошёл проверку на живучесть",
+                "&c[{killer}] &7выдал &c[{victim}] &7бесплатный билет в спектаторы",
+                "&c[{victim}] &7пошёл поспать. Навсегда.",
+                "&c[{killer}] &7сказал &c[{victim}] &7«не сегодня»",
+                "&c[{victim}] &7проиграл PvP и смысл жизни",
+                "&c[{killer}] &7отключил &c[{victim}] &7от сервера (временно)",
+                "&c[{victim}] &7узнал, что броня — это миф",
+                "&c[{killer}] &7научил &c[{victim}] &7летать без элитр",
+                "&c[{victim}] &7был удалён из реальности игроком &c[{killer}]",
+                "&c[{killer}] &7сделал из &c[{victim}] &7декорацию",
+                "&c[{victim}] &7забыл, как работает блокирование",
+                "&c[{killer}] &7доказал &c[{victim}] &7что Ctrl — не спасает",
+                "&c[{victim}] &7переоценил свои возможности",
+                "&c[{killer}] &7отправил &c[{victim}] &7на перезагрузку",
+                "&c[{victim}] &7получил урок PvP от &c[{killer}]",
+                "&c[{killer}] &7объяснил &c[{victim}] &7что такое боль",
+                "&c[{victim}] &7стал частью истории сервера",
+                "&c[{victim}] &7нажал не те кнопки",
+                "&c[{killer}] &7превратил &c[{victim}] &7в статистику",
+                "&c[{victim}] &7думал, что это PvE",
+                "&c[{killer}] &7выключил &c[{victim}] &7как лампочку",
+                "&c[{victim}] &7попробовал… и не получилось",
+                "&c[{killer}] &7написал &c[{victim}] &7прощальное сообщение",
+                "&c[{victim}] &7не прошёл кастинг на выживание",
+                "&c[{killer}] &7отправил &c[{victim}] &7в архив",
+                "&c[{victim}] &7стал отрицательной статистикой",
+                "&c[{killer}] &7сделал Ctrl+A → Ctrl+X из &c[{victim}]"
+        );
     }
 }
