@@ -1,4 +1,3 @@
-\
 package com.example.heartbounty;
 
 import org.bukkit.Bukkit;
