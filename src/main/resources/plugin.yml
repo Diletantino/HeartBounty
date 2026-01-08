@@ -1,0 +1,17 @@
+name: HeartBounty
+version: 1.0.0
+main: com.example.heartbounty.HeartBountyPlugin
+api-version: '1.21'
+author: ChatGPT
+commands:
+  withdraw:
+    description: Withdraw hearts into items.
+    usage: /withdraw [amount]
+  hearts:
+    description: Admin/creative heart controls.
+    usage: /hearts <add|set|giveitem> [player] <amount>
+permissions:
+  heartbounty.withdraw:
+    default: true
+  heartbounty.admin:
+    default: op

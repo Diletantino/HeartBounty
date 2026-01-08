@@ -1,0 +1,11 @@
+# HeartBounty config
+# A "heart" = 2 health points.
+minHearts: 1
+maxHearts: 20
+# Effect on PvP kill: killer +1 heart, victim -1 heart
+heartsPerKill: 1
+# Withdraw item material (must be a valid Material)
+withdrawItemMaterial: NETHER_STAR
+withdrawItemName: "&cHeart"
+withdrawItemLore:
+  - "&7Right-click to gain &c+1 heart&7."
